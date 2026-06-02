@@ -58,7 +58,10 @@ class MinioFileSystem(BaseFileSystem):
         # region is passed explicitly to prevent the SDK from calling
         # GetBucketLocation, which fails for restricted service accounts.
         self.client = Minio(
-            endpoint, access_key=access_key, secret_key=secret_key, secure=secure,
+            endpoint,
+            access_key=access_key,
+            secret_key=secret_key,
+            secure=secure,
             region=self.region,
         )
 
