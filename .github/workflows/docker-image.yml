@@ -25,6 +25,7 @@ concurrency:
 
 env:
   REGISTRY_GHCR: ghcr.io
+  REGISTRY_HARBOR: ${{ secrets.HARBOR_URL }}
 
 jobs:
   prepare:
@@ -109,6 +110,13 @@ jobs:
           username: ${{ secrets.GHCR_USERNAME }}
           password: ${{ secrets.GHCR_TOKEN }}
 
+      - name: Log in to Harbor
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY_HARBOR }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_TOKEN }}
+
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v7
@@ -116,7 +124,7 @@ jobs:
           context: ${{ matrix.service.context }}
           file: ${{ matrix.service.dockerfile }}
           platforms: ${{ matrix.platform.name }}
-          outputs: 'type=image,"name=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.service.name }},${{ env.REGISTRY_GHCR }}/${{ secrets.GHCR_USERNAME }}/${{ matrix.service.name }}",push-by-digest=true,name-canonical=true,push=true'
+          outputs: 'type=image,"name=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.service.name }},${{ env.REGISTRY_GHCR }}/${{ secrets.GHCR_USERNAME }}/${{ matrix.service.name }},${{ env.REGISTRY_HARBOR }}/devops/${{ matrix.service.name }}",push-by-digest=true,name-canonical=true,push=true'
           cache-from: type=gha,scope=${{ matrix.service.name }}-${{ matrix.platform.short }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service.name }}-${{ matrix.platform.short }}
 
@@ -168,10 +176,18 @@ jobs:
           username: ${{ secrets.GHCR_USERNAME }}
           password: ${{ secrets.GHCR_TOKEN }}
 
+      - name: Log in to Harbor
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY_HARBOR }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_TOKEN }}
+
       - name: Create manifest lists
         env:
           DH_NAMESPACE: ${{ secrets.DOCKERHUB_USERNAME }}
           GH_NAMESPACE: ${{ env.REGISTRY_GHCR }}/${{ secrets.GHCR_USERNAME }}
+          HB_NAMESPACE: ${{ env.REGISTRY_HARBOR }}/devops
           VERSION: ${{ needs.prepare.outputs.version }}
           SHORT_SHA: ${{ needs.prepare.outputs.short_sha }}
           PUSH_LATEST: ${{ needs.prepare.outputs.push_latest }}
@@ -181,11 +197,13 @@ jobs:
             digest_dir="/tmp/digests/$service"
             dh_image="$DH_NAMESPACE/$service"
             gh_image="$GH_NAMESPACE/$service"
+            hb_image="$HB_NAMESPACE/$service"
 
             for digest_file in "$digest_dir"/*; do
               digest="$(cat "$digest_file")"
               docker buildx imagetools inspect "$dh_image@sha256:$digest" >/dev/null
               docker buildx imagetools inspect "$gh_image@sha256:$digest" >/dev/null
+              docker buildx imagetools inspect "$hb_image@sha256:$digest" >/dev/null
             done
           }
 
@@ -194,20 +212,25 @@ jobs:
             digest_dir="/tmp/digests/$service"
             dh_image="$DH_NAMESPACE/$service"
             gh_image="$GH_NAMESPACE/$service"
+            hb_image="$HB_NAMESPACE/$service"
 
             dh_refs=$(printf "${dh_image}@sha256:%s " $(cat "$digest_dir"/*))
             gh_refs=$(printf "${gh_image}@sha256:%s " $(cat "$digest_dir"/*))
+            hb_refs=$(printf "${hb_image}@sha256:%s " $(cat "$digest_dir"/*))
 
             dh_tags=(-t "$dh_image:$VERSION" -t "$dh_image:$SHORT_SHA")
             gh_tags=(-t "$gh_image:$VERSION" -t "$gh_image:$SHORT_SHA")
+            hb_tags=(-t "$hb_image:$VERSION" -t "$hb_image:$SHORT_SHA")
 
             if [ "$PUSH_LATEST" = "true" ]; then
               dh_tags+=(-t "$dh_image:latest")
               gh_tags+=(-t "$gh_image:latest")
+              hb_tags+=(-t "$hb_image:latest")
             fi
 
             docker buildx imagetools create "${dh_tags[@]}" $dh_refs
             docker buildx imagetools create "${gh_tags[@]}" $gh_refs
+            docker buildx imagetools create "${hb_tags[@]}" $hb_refs
           }
 
           inspect_digests dograh-api
@@ -215,31 +238,3 @@ jobs:
           create_manifests dograh-api
           create_manifests dograh-ui
 
-  notify:
-    needs:
-      - prepare
-      - merge
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Slack success
-        if: needs.merge.result == 'success'
-        uses: slackapi/slack-github-action@v1.26.0
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        with:
-          payload: |
-            {
-              "text": "✅ Docker images built for ${{ needs.prepare.outputs.version }} on ${{ github.ref_name }} by ${{ github.actor }}"
-            }
-
-      - name: Slack failure
-        if: needs.merge.result != 'success'
-        uses: slackapi/slack-github-action@v1.26.0
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        with:
-          payload: |
-            {
-              "text": "❌ Docker build failed for ${{ needs.prepare.outputs.version }} on ${{ github.ref_name }} by ${{ github.actor }} - <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>"
-            }
