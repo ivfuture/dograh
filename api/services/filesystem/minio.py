@@ -1,7 +1,10 @@
 import asyncio
-import json
+import io
+import os
 from typing import Any, BinaryIO, Dict, Optional
 
+import boto3
+from botocore.client import Config
 from loguru import logger
 from minio import Minio
 from minio.error import S3Error
@@ -47,47 +50,21 @@ class MinioFileSystem(BaseFileSystem):
         self.secure = secure
         self.access_key = access_key
         self.secret_key = secret_key
+        # Region must match the MinIO server's configured region.
+        # Override via MINIO_REGION env var (default matches standard MinIO default).
+        self.region = os.getenv("MINIO_REGION", "us-east-1")
 
-        # Client for internal operations (uploads, etc.)
+        # Client for internal operations (uploads, downloads, etc.)
         self.client = Minio(
             endpoint, access_key=access_key, secret_key=secret_key, secure=secure
         )
 
-        # Ensure bucket exists and configure anonymous access (using internal client)
+        # Ensure bucket exists (using internal client)
         try:
             if not self.client.bucket_exists(self.bucket_name):
                 self.client.make_bucket(self.bucket_name)
-
-            # Set public read/write policy for local development
-            # This allows:
-            # 1. Anonymous downloads (s3:GetObject)
-            # 2. Anonymous uploads (s3:PutObject) - bypasses presigned URL signature issues
-            # 3. List bucket contents (s3:ListBucket) for debugging
-            # Note: This is set on every initialization to ensure policy is correct
-            # WARNING: Only use in local development, not production!
-            policy = {
-                "Version": "2012-10-17",
-                "Statement": [
-                    {
-                        "Effect": "Allow",
-                        "Principal": {"AWS": "*"},
-                        "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-                        "Resource": [f"arn:aws:s3:::{self.bucket_name}/*"],
-                    },
-                    {
-                        "Effect": "Allow",
-                        "Principal": {"AWS": "*"},
-                        "Action": ["s3:ListBucket"],
-                        "Resource": [f"arn:aws:s3:::{self.bucket_name}"],
-                    },
-                ],
-            }
-
-            self.client.set_bucket_policy(self.bucket_name, json.dumps(policy))
         except Exception as e:
-            # Bucket might already exist or we might be in a restricted environment
             logger.debug(f"Bucket setup note: {e}")
-            pass
 
     async def acreate_file(self, file_path: str, content: BinaryIO) -> bool:
         try:
@@ -97,7 +74,7 @@ class MinioFileSystem(BaseFileSystem):
                 self.client.put_object(
                     self.bucket_name,
                     file_path,
-                    data=bytes(data),
+                    data=io.BytesIO(data),
                     length=len(data),
                 )
 
@@ -161,21 +138,30 @@ class MinioFileSystem(BaseFileSystem):
         content_type: str = "text/csv",
         max_size: int = 10_485_760,
     ) -> Optional[str]:
-        """Generate an unsigned URL for direct file upload.
+        """Generate a presigned PUT URL for direct browser-to-storage upload.
 
-        For local MinIO development with anonymous upload enabled, we return
-        a simple unsigned URL instead of a presigned URL. This avoids signature
-        mismatch issues when the internal endpoint (minio:9000) differs from
-        the public endpoint (localhost:9000).
-
-        The bucket policy allows anonymous s3:PutObject, so no signature is needed.
+        Uses boto3 to generate the signature locally (no API calls to MinIO),
+        signed against the public endpoint so the URL is usable from browsers.
+        The region must match the MinIO server's configured region (MINIO_REGION).
         """
         try:
-            url = f"{self.public_endpoint}/{self.bucket_name}/{file_path}"
-            logger.debug(f"Generated unsigned upload URL: {url}")
+            s3 = boto3.client(
+                "s3",
+                endpoint_url=self.public_endpoint,
+                aws_access_key_id=self.access_key,
+                aws_secret_access_key=self.secret_key,
+                config=Config(signature_version="s3v4"),
+                region_name=self.region,
+            )
+            url = s3.generate_presigned_url(
+                "put_object",
+                Params={"Bucket": self.bucket_name, "Key": file_path},
+                ExpiresIn=expiration,
+            )
+            logger.debug(f"Generated presigned PUT URL for {file_path}")
             return url
         except Exception as e:
-            logger.error(f"Error generating MinIO upload URL: {e}")
+            logger.error(f"Error generating presigned upload URL: {e}")
             return None
 
     async def adownload_file(self, source_path: str, local_path: str) -> bool:
