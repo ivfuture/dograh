@@ -238,31 +238,3 @@ jobs:
           create_manifests dograh-api
           create_manifests dograh-ui
 
-  notify:
-    needs:
-      - prepare
-      - merge
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Slack success
-        if: needs.merge.result == 'success'
-        uses: slackapi/slack-github-action@v1.26.0
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        with:
-          payload: |
-            {
-              "text": "✅ Docker images built for ${{ needs.prepare.outputs.version }} on ${{ github.ref_name }} by ${{ github.actor }}"
-            }
-
-      - name: Slack failure
-        if: needs.merge.result != 'success'
-        uses: slackapi/slack-github-action@v1.26.0
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        with:
-          payload: |
-            {
-              "text": "❌ Docker build failed for ${{ needs.prepare.outputs.version }} on ${{ github.ref_name }} by ${{ github.actor }} - <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>"
-            }
